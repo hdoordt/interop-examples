@@ -1,8 +1,9 @@
 #![deny(improper_ctypes_definitions)]
 
-mod crc32;
+pub mod crc32;
 
-mod bsn;
+pub mod bsn_diplomat;
+pub mod bsn_cbindgen;
 
 #[no_mangle]
 pub extern "C" fn say_hello() {

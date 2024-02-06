@@ -11,7 +11,6 @@ crate-type = ["dylib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serde = "1.0.196"
 diplomat = "0.5.0"
 diplomat-runtime = "0.5.0"
 
