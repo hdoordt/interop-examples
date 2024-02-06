@@ -1,0 +1,20 @@
+[package]
+name = "rust-in-c"
+version = "0.1.0"
+edition = "2021"
+
+
+[lib]
+name = "crc_in_rust"
+crate-type = ["dylib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = "1.0.196"
+diplomat = "0.5.0"
+diplomat-runtime = "0.5.0"
+
+
+[build-dependencies]
+cbindgen = "0.26.0"
