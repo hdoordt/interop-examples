@@ -3,11 +3,23 @@ use std::fmt::Display;
 pub use ffi::*;
 use serde::{de::Visitor, Deserialize, Serialize};
 
+// Errors are pretty vague
 #[diplomat::bridge]
 pub mod ffi {
-    #[derive(Debug)]
+    use diplomat_runtime::DiplomatWriteable;
+    use std::fmt::Write;
+
+    // Clone does not get exposed, even though it could
+    #[derive(Debug, Clone)]
     pub enum Error {
         InvalidBsn,
+    }
+
+    impl Error {
+        // For some reason can't receive &self?
+        pub fn fmt_display(this: &Self, w: &mut DiplomatWriteable) -> Result<(), ()> {
+            write!(w, "{}", this).map_err(|_| ())
+        }
     }
 
     #[derive(Debug, PartialEq, Eq, Clone)]
@@ -17,6 +29,7 @@ pub mod ffi {
     }
 
     impl Bsn {
+        // Can only return boxed refs of Self
         pub fn try_new_boxed(bsn: &str) -> Result<Box<Self>, Error> {
             Self::try_new(bsn).map(Box::new)
         }
@@ -43,6 +56,7 @@ pub mod ffi {
         }
     }
 }
+// Need to define trait impls outside bridge block
 
 impl std::error::Error for Error {}
 

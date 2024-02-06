@@ -1,6 +1,7 @@
 use std::slice;
 
 /// Calculate CRC32 for passed data.
+///
 /// # Safety
 /// This function uses [slice::from_raw_parts] to create a slice
 /// out of the passed raw pointer and length, and

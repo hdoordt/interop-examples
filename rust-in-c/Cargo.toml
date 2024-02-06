@@ -18,3 +18,4 @@ diplomat-runtime = "0.5.0"
 
 [build-dependencies]
 cbindgen = "0.26.0"
+diplomat-tool = "0.7.0"
