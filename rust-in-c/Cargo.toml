@@ -3,17 +3,15 @@ name = "rust-in-c"
 version = "0.1.0"
 edition = "2021"
 
-
 [lib]
-name = "crc_in_rust"
-crate-type = ["dylib"]
+name = "rust_in_c"
+crate-type = ["cdylib", "staticlib"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 diplomat = "0.5.0"
 diplomat-runtime = "0.5.0"
-
 
 [build-dependencies]
 cbindgen = "0.26.0"

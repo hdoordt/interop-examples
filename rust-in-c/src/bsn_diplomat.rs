@@ -1,36 +1,31 @@
-use std::fmt::Display;
+use ffi::*;
 
-pub use ffi::*;
-
-// Errors are pretty vague
 #[diplomat::bridge]
-pub mod ffi {
-    use diplomat_runtime::DiplomatWriteable;
-    use std::fmt::Write;
+mod ffi {
 
-    // Clone does not get exposed, even though it could
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     pub enum BsnError {
         InvalidBsn,
     }
 
     impl BsnError {
-        // For some reason can't receive &self?
         #[allow(clippy::result_unit_err)]
-        pub fn fmt_display(this: &Self, w: &mut DiplomatWriteable) -> Result<(), ()> {
+        pub fn fmt_display(
+            this: &Self,
+            w: &mut diplomat_runtime::DiplomatWriteable,
+        ) -> Result<(), ()> {
+            use std::fmt::Write;
             write!(w, "{}", this).map_err(|_e| ())
         }
     }
 
-    #[derive(Debug, PartialEq, Eq, Clone)]
+    /// Represents a valid BSN
     #[diplomat::opaque]
-    // Lifetimes not supported
     pub struct Bsn {
-        pub(crate) inner: String,
+        pub(super) inner: String,
     }
 
     impl Bsn {
-        // Can only return boxed refs of Self
         pub fn try_new_boxed(bsn: &str) -> Result<Box<Self>, BsnError> {
             Self::try_new(bsn).map(Box::new)
         }
@@ -57,17 +52,6 @@ pub mod ffi {
         }
     }
 }
-// Need to define trait impls outside bridge block
-
-impl std::error::Error for BsnError {}
-
-impl Display for BsnError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BsnError::InvalidBsn => write!(f, "Invalid BSN number"),
-        }
-    }
-}
 
 impl Bsn {
     pub fn try_new(bsn: &str) -> Result<Self, BsnError> {
@@ -76,6 +60,16 @@ impl Bsn {
             Ok(Self { inner: bsn })
         } else {
             Err(BsnError::InvalidBsn)
+        }
+    }
+}
+
+impl std::error::Error for BsnError {}
+
+impl std::fmt::Display for BsnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BsnError::InvalidBsn => write!(f, "Invalid BSN number"),
         }
     }
 }

@@ -1,3 +1,4 @@
 target/
 bindings/*
-rust-in-c
+rust-in-c-static
+rust-in-c-dynamic
