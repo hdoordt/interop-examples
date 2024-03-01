@@ -1,0 +1,7 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "./rust-in-c/Cargo.toml",
+        "./c-in-rust/tweetnacl-sys/Cargo.toml",
+        "./c-in-rust/tweetnacl/Cargo.toml",
+    ]
+}
