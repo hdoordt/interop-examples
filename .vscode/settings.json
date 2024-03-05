@@ -3,5 +3,6 @@
         "./rust-in-c/Cargo.toml",
         "./c-in-rust/tweetnacl-sys/Cargo.toml",
         "./c-in-rust/tweetnacl/Cargo.toml",
+        "./rust-in-python/strompy/Cargo.toml",
     ]
 }
