@@ -125,6 +125,31 @@ impl From<struson::serde::DeserializerError> for Error {
     }
 }
 
+mod py {
+    use pyo3::prelude::*;
+
+    use crate::{MatrixBuf, PieceOfWork};
+
+    impl From<MatrixBuf> for Vec<Vec<f64>> {
+        fn from(MatrixBuf { d, n }: MatrixBuf) -> Self {
+            d.chunks_exact(n).into_iter().map(|c| c.to_vec()).collect()
+        }
+    }
+
+    #[pyfunction]
+    fn exec(json_bytes: &[u8]) -> PyResult<Vec<Vec<Vec<f64>>>> {
+        let work: Vec<PieceOfWork> = serde_json::from_reader(json_bytes).unwrap();
+
+        Ok(work.into_iter().map(|p| p.exec().into()).collect())
+    }
+
+    #[pymodule]
+    fn strompy(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+        m.add_function(wrap_pyfunction!(exec, m)?)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use struson::reader::{JsonReader, JsonStreamReader};
