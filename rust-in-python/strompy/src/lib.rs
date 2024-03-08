@@ -1,5 +1,6 @@
-use std::io::Read;
+use std::num::{ParseFloatError, ParseIntError};
 
+use futures::AsyncRead;
 use heapless::Vec as HeaplessVec;
 use nalgebra as na;
 use struson::reader::{JsonReader, JsonStreamReader};
@@ -29,6 +30,36 @@ impl MatrixBuf {
         let cols = self.n;
         MatrixView::from_slice_generic(&self.d, na::Dyn(rows), na::Dyn(cols))
     }
+
+    pub async fn deserialize<R: AsyncRead + Unpin>(
+        reader: &mut JsonStreamReader<R>,
+    ) -> Result<Self> {
+        reader.begin_object().await?;
+
+        let mut d = None;
+        let mut n = None;
+        for _ in 0..2 {
+            match reader.next_name().await? {
+                "d" => {
+                    reader.begin_array().await?;
+                    let mut d_vec = HeaplessVec::new();
+                    while reader.has_next().await? {
+                        d_vec.push(reader.next_number().await??).unwrap();
+                    }
+                    reader.end_array().await?;
+                    d = Some(d_vec);
+                }
+                "n" => n = Some(reader.next_number().await??),
+                _ => panic!("No good!"),
+            }
+        }
+
+        reader.end_object().await?;
+        let (Some(d), Some(n)) = (d, n) else {
+            panic!("No good either!")
+        };
+        Ok(Self { d, n })
+    }
 }
 
 /// An operation that can be performed on a Matrix
@@ -53,6 +84,34 @@ impl Operation {
             }
         }
     }
+
+    pub async fn deserialize<R: AsyncRead + Unpin>(
+        reader: &mut JsonStreamReader<R>,
+    ) -> Result<Self> {
+        reader.begin_object().await?;
+        let mut code = None;
+        let mut rhs = None;
+
+        for _ in 0..2 {
+            match reader.next_name().await? {
+                "code" => {
+                    code = Some(reader.next_string().await?);
+                }
+                "rhs" => rhs = Some(MatrixBuf::deserialize(reader).await?),
+                _ => panic!("No good!"),
+            }
+        }
+
+        reader.end_object().await?;
+
+        let (Some(code), Some(rhs)) = (code, rhs) else {
+            panic!("No good either!")
+        };
+        match code.as_str() {
+            "dot" => Ok(Self::Dot { rhs }),
+            _ => panic!("no good!"),
+        }
+    }
 }
 
 /// A single piece of work
@@ -75,32 +134,34 @@ impl PieceOfWork {
     }
 
     /// Read and execute a single [PieceOfWork]
-    pub fn exec_streamingly<R: Read>(reader: &mut JsonStreamReader<R>) -> Result<MatrixBuf> {
-        reader.begin_object()?;
+    pub async fn exec_streamingly<R: AsyncRead + Unpin>(
+        reader: &mut JsonStreamReader<R>,
+    ) -> Result<MatrixBuf> {
+        reader.begin_object().await?;
 
         // First, we need the `lhs` object
-        let "lhs" = reader.next_name()? else {
+        let "lhs" = reader.next_name().await? else {
             return Err(Error::Json("lhs"));
         };
-        let lhs: MatrixBuf = reader.deserialize_next()?;
+        let lhs: MatrixBuf = MatrixBuf::deserialize(reader).await?;
 
         // Then, we read the `op` array element-by-element
         // We execute operations as they come in
-        let "op" = reader.next_name()? else {
+        let "op" = reader.next_name().await? else {
             return Err(Error::Json("op"));
         };
 
-        reader.begin_array()?;
+        reader.begin_array().await?;
 
         let mut res = lhs;
-        while reader.has_next()? {
-            let op: Operation = reader.deserialize_next()?;
+        while reader.has_next().await? {
+            let op: Operation = Operation::deserialize(reader).await?;
             res = op.eval(res);
         }
 
-        reader.end_array()?;
+        reader.end_array().await?;
 
-        reader.end_object()?;
+        reader.end_object().await?;
 
         Ok(res)
     }
@@ -110,7 +171,9 @@ impl PieceOfWork {
 pub enum Error {
     Json(&'static str),
     Struson(struson::reader::ReaderError),
-    Serde(struson::serde::DeserializerError),
+    ParseFloat(ParseFloatError),
+    ParseInt(ParseIntError),
+    // Serde(struson::serde::DeserializerError),
 }
 
 impl From<struson::reader::ReaderError> for Error {
@@ -119,9 +182,15 @@ impl From<struson::reader::ReaderError> for Error {
     }
 }
 
-impl From<struson::serde::DeserializerError> for Error {
-    fn from(e: struson::serde::DeserializerError) -> Self {
-        Self::Serde(e)
+impl From<ParseFloatError> for Error {
+    fn from(e: ParseFloatError) -> Self {
+        Self::ParseFloat(e)
+    }
+}
+
+impl From<ParseIntError> for Error {
+    fn from(e: ParseIntError) -> Self {
+        Self::ParseInt(e)
     }
 }
 
@@ -170,27 +239,21 @@ mod test {
         assert_eq!(res.view(), nalgebra::matrix![1586.0]);
     }
 
-    #[test]
-    fn it_deserializes_streamingly() {
-        let file = std::fs::File::open("op.json").unwrap();
+    #[tokio::test]
+    async fn it_works_streamingly() {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+        let file = tokio::fs::File::open("op.json").await.unwrap().compat();
         let mut json_reader = JsonStreamReader::new(file);
 
-        json_reader.begin_array().unwrap();
-        let _work: PieceOfWork = json_reader.deserialize_next().unwrap();
-    }
+        json_reader.begin_array().await.unwrap();
 
-    #[test]
-    fn it_works_streamingly() {
-        let file = std::fs::File::open("op.json").unwrap();
-        let mut json_reader = JsonStreamReader::new(file);
-
-        json_reader.begin_array().unwrap();
-
-        let res = PieceOfWork::exec_streamingly(&mut json_reader).unwrap();
+        let res = PieceOfWork::exec_streamingly(&mut json_reader)
+            .await
+            .unwrap();
         assert_eq!(res.view(), nalgebra::matrix![1586.0]);
 
-        assert!(!json_reader.has_next().unwrap());
+        assert!(!json_reader.has_next().await.unwrap());
 
-        json_reader.end_array().unwrap();
+        json_reader.end_array().await.unwrap();
     }
 }
