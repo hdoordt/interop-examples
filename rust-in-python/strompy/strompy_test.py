@@ -7,3 +7,5 @@ data = file.read()
 res = strompy.exec(data)
 
 print(res)
+
+file.close()

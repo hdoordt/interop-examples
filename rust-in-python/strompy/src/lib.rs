@@ -50,13 +50,15 @@ impl MatrixBuf {
                     d = Some(d_vec);
                 }
                 "n" => n = Some(reader.next_number().await??),
-                _ => panic!("No good!"),
+                _ => return Err(Error::Json("Unexpected field name in MatrixBuf")),
             }
         }
 
         reader.end_object().await?;
         let (Some(d), Some(n)) = (d, n) else {
-            panic!("No good either!")
+            return Err(Error::Json(
+                "Not all fields of MatrixBuf were given, or too many fields",
+            ));
         };
         Ok(Self { d, n })
     }
@@ -98,18 +100,20 @@ impl Operation {
                     code = Some(reader.next_string().await?);
                 }
                 "rhs" => rhs = Some(MatrixBuf::deserialize(reader).await?),
-                _ => panic!("No good!"),
+                _ => return Err(Error::Json("Unexpected field name in Operation object")),
             }
         }
 
         reader.end_object().await?;
 
         let (Some(code), Some(rhs)) = (code, rhs) else {
-            panic!("No good either!")
+            return Err(Error::Json(
+                "Not all fields of Operation were given, or too many fields",
+            ));
         };
         match code.as_str() {
             "dot" => Ok(Self::Dot { rhs }),
-            _ => panic!("no good!"),
+            _ => return Err(Error::Json("Unexpected Operation code")),
         }
     }
 }
@@ -173,7 +177,7 @@ pub enum Error {
     Struson(struson::reader::ReaderError),
     ParseFloat(ParseFloatError),
     ParseInt(ParseIntError),
-    // Serde(struson::serde::DeserializerError),
+    Io(std::io::Error),
 }
 
 impl From<struson::reader::ReaderError> for Error {
@@ -194,10 +198,106 @@ impl From<ParseIntError> for Error {
     }
 }
 
-mod py {
-    use pyo3::prelude::*;
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
 
-    use crate::{MatrixBuf, PieceOfWork};
+pub(crate) mod channel {
+    use std::sync::Arc;
+
+    use super::*;
+    use futures::{
+        io::{Cursor, ReadHalf, WriteHalf},
+        lock::Mutex,
+        AsyncReadExt, AsyncWriteExt,
+    };
+    use pyo3::prelude::*;
+    use struson::reader::JsonStreamReader;
+
+    #[pyclass]
+    #[derive(Clone)]
+    pub struct StrompyWriter {
+        inner: Arc<Mutex<StrompyWriterInner>>,
+    }
+
+    struct StrompyWriterInner {
+        writer: WriteHalf<Cursor<Vec<u8>>>,
+    }
+
+    impl Drop for StrompyWriterInner {
+        fn drop(&mut self) {
+            println!("Dropped StrompyWriterInner!");
+        }
+    }
+
+    impl StrompyWriter {
+        pub async fn feed(&mut self, bytes: &[u8]) -> Result<()> {
+            println!("Feeding writer:\n{}", String::from_utf8_lossy(&bytes));
+            let mut inner = self.inner.lock().await;
+            inner.writer.write(bytes).await?;
+
+            Ok(())
+        }
+    }
+
+    #[pyclass]
+    #[derive(Clone)]
+    pub struct StrompyJsonReader {
+        inner: Arc<Mutex<StrompyJsonReaderInner>>,
+    }
+
+    struct StrompyJsonReaderInner {
+        in_array: bool,
+        reader: JsonStreamReader<ReadHalf<Cursor<Vec<u8>>>>,
+    }
+
+    impl Drop for StrompyJsonReaderInner {
+        fn drop(&mut self) {
+            println!("Dropped JSON Reader Inner");
+        }
+    }
+
+    impl StrompyJsonReader {
+        pub async fn next(&mut self) -> Result<MatrixBuf> {
+            let mut inner = self.inner.lock().await;
+            if !inner.in_array {
+                println!("Begin array");
+                inner.reader.begin_array().await.unwrap();
+                inner.in_array = true;
+            }
+            PieceOfWork::exec_streamingly(&mut inner.reader).await
+        }
+    }
+
+    pub fn channel() -> (StrompyJsonReader, StrompyWriter) {
+        let (reader, writer) = Cursor::new(Vec::with_capacity(1024)).split();
+
+        let reader = JsonStreamReader::new(reader);
+        let inner = StrompyJsonReaderInner {
+            in_array: false,
+            reader,
+        };
+        let inner = Arc::new(Mutex::new(inner));
+        let reader = StrompyJsonReader { inner };
+
+        let inner = StrompyWriterInner { writer };
+        let inner = Arc::new(Mutex::new(inner));
+        let writer = StrompyWriter { inner };
+
+        (reader, writer)
+    }
+}
+
+mod py {
+    use pyo3::{prelude::*, types::PyBytes};
+    use pyo3_asyncio::tokio::{future_into_py, into_future};
+
+    use crate::{
+        channel::{StrompyJsonReader, StrompyWriter},
+        MatrixBuf, PieceOfWork,
+    };
 
     impl From<MatrixBuf> for Vec<Vec<f64>> {
         fn from(MatrixBuf { d, n }: MatrixBuf) -> Self {
@@ -212,9 +312,52 @@ mod py {
         Ok(work.into_iter().map(|p| p.exec().into()).collect())
     }
 
+    #[pyfunction]
+    fn channel<'py>(_py: Python<'py>) -> PyResult<(StrompyJsonReader, StrompyWriter)> {
+        Ok(crate::channel::channel())
+    }
+
+    #[pyfunction]
+    fn feed_bytes<'py>(
+        py: Python<'py>,
+        mut writer: StrompyWriter,
+        read_coro: &PyAny,
+    ) -> PyResult<&'py PyAny> {
+        let read_fut = into_future(read_coro)?;
+
+        future_into_py(py, async move {
+            let bytes = read_fut.await.unwrap();
+            let bytes: Vec<u8> = Python::with_gil(|py| {
+                let bytes: &PyBytes = bytes.extract(py).unwrap();
+
+                // This probably copies everything, and therefore defeats the purpose
+                bytes.extract().unwrap()
+            });
+
+            writer.feed(&bytes).await.unwrap();
+
+            Ok(())
+        })
+    }
+
+    #[pyfunction]
+    fn poll_next<'py>(py: Python<'py>, mut reader: StrompyJsonReader) -> PyResult<&'py PyAny> {
+        future_into_py(py, async move {
+            println!("Polling");
+            let m = reader.next().await.unwrap();
+            let res: Vec<Vec<f64>> = m.into();
+            Ok(res)
+        })
+    }
+
     #[pymodule]
-    fn strompy(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+    fn strompy(_py: Python, m: &PyModule) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(exec, m)?)?;
+        m.add_function(wrap_pyfunction!(channel, m)?)?;
+        m.add_function(wrap_pyfunction!(feed_bytes, m)?)?;
+        m.add_function(wrap_pyfunction!(poll_next, m)?)?;
+        m.add_class::<StrompyWriter>()?;
+        m.add_class::<StrompyJsonReader>()?;
         Ok(())
     }
 }
