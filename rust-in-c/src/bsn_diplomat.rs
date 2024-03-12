@@ -22,7 +22,7 @@ mod ffi {
     /// Represents a valid BSN
     #[diplomat::opaque]
     pub struct Bsn {
-        pub(super) inner: String,
+        pub inner: String,
     }
 
     impl Bsn {
