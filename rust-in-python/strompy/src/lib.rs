@@ -5,6 +5,7 @@ use heapless::Vec as HeaplessVec;
 use nalgebra as na;
 use struson::reader::{JsonReader, JsonStreamReader};
 
+mod chan;
 type Result<T> = core::result::Result<T, Error>;
 
 /// A [nalgebra::Matrix] that is backed by some other means of storage.
@@ -207,11 +208,14 @@ impl From<std::io::Error> for Error {
 pub(crate) mod channel {
     use std::sync::Arc;
 
+    use crate::chan::Channel;
+
     use super::*;
     use futures::{
-        io::{Cursor, ReadHalf, WriteHalf},
+        io::Cursor,
         lock::Mutex,
-        AsyncReadExt, AsyncWriteExt,
+        AsyncWriteExt,
+        // AsyncReadExt, AsyncWriteExt,
     };
     use pyo3::prelude::*;
     use struson::reader::JsonStreamReader;
@@ -219,11 +223,13 @@ pub(crate) mod channel {
     #[pyclass]
     #[derive(Clone)]
     pub struct StrompyWriter {
-        inner: Arc<Mutex<StrompyWriterInner>>,
+        // inner: Arc<Mutex<StrompyWriterInner>>,
+        writer: Channel,
     }
 
     struct StrompyWriterInner {
-        writer: WriteHalf<Cursor<Vec<u8>>>,
+        // writer: WriteHalf<Cursor<Vec<u8>>>,
+        writer: Channel,
     }
 
     impl Drop for StrompyWriterInner {
@@ -235,9 +241,11 @@ pub(crate) mod channel {
     impl StrompyWriter {
         pub async fn feed(&mut self, bytes: &[u8]) -> Result<()> {
             println!("Feeding writer:\n{}", String::from_utf8_lossy(&bytes));
-            let mut inner = self.inner.lock().await;
-            inner.writer.write(bytes).await?;
-
+            // let mut writer = self.writer.lock().await;
+            // writer.write_all(bytes).await?;
+            // let mut inner = self.inner.lock().await;
+            // inner.writer.write(bytes).await?;
+            self.writer.write_all(bytes).await?;
             Ok(())
         }
     }
@@ -245,12 +253,14 @@ pub(crate) mod channel {
     #[pyclass]
     #[derive(Clone)]
     pub struct StrompyJsonReader {
+        // reader: Arc<Mutex<tokio::io::DuplexStream>>,
         inner: Arc<Mutex<StrompyJsonReaderInner>>,
     }
 
     struct StrompyJsonReaderInner {
         in_array: bool,
-        reader: JsonStreamReader<ReadHalf<Cursor<Vec<u8>>>>,
+        // reader: JsonStreamReader<ReadHalf<Cursor<Vec<u8>>>>,
+        reader: JsonStreamReader<Channel>,
     }
 
     impl Drop for StrompyJsonReaderInner {
@@ -272,9 +282,10 @@ pub(crate) mod channel {
     }
 
     pub fn channel() -> (StrompyJsonReader, StrompyWriter) {
-        let (reader, writer) = Cursor::new(Vec::with_capacity(1024)).split();
+        // let (reader, writer) = Cursor::new(Vec::with_capacity(1024)).split();
+        let chan = Channel::new();
 
-        let reader = JsonStreamReader::new(reader);
+        let reader = JsonStreamReader::new(chan.clone());
         let inner = StrompyJsonReaderInner {
             in_array: false,
             reader,
@@ -282,17 +293,19 @@ pub(crate) mod channel {
         let inner = Arc::new(Mutex::new(inner));
         let reader = StrompyJsonReader { inner };
 
-        let inner = StrompyWriterInner { writer };
-        let inner = Arc::new(Mutex::new(inner));
-        let writer = StrompyWriter { inner };
+        // let inner = StrompyWriterInner { writer: chan };
+        // let inner = Arc::new(Mutex::new(inner));
+        let writer = StrompyWriter { writer: chan };
 
         (reader, writer)
     }
 }
 
 mod py {
+    use std::{future::Future, pin::pin, task::Context};
+
+    use futures::future::poll_fn;
     use pyo3::{prelude::*, types::PyBytes};
-    use pyo3_asyncio::tokio::{future_into_py, into_future};
 
     use crate::{
         channel::{StrompyJsonReader, StrompyWriter},
@@ -317,6 +330,7 @@ mod py {
         Ok(crate::channel::channel())
     }
 
+    /*
     #[pyfunction]
     fn feed_bytes<'py>(
         py: Python<'py>,
@@ -349,6 +363,51 @@ mod py {
             Ok(res)
         })
     }
+    */
+
+    #[pyfunction]
+    async fn feed_bytes<'py>(mut writer: StrompyWriter, bytes: Py<PyBytes>) -> PyResult<()> {
+        println!("{}:{}:{:?}", file!(), line!(), std::thread::current().id());
+        poll_fn(|cx| {
+            let waker = cx.waker();
+            Python::with_gil(|py| {
+                let bytes = bytes.as_bytes(py);
+                let fut = writer.feed(bytes);
+                let fut = pin!(fut);
+                py.allow_threads(|| {
+                    println!("{}:{}:{:?}", file!(), line!(), std::thread::current().id());
+                    let p = fut.poll(&mut Context::from_waker(waker));
+                    p
+                })
+            })
+        })
+        .await
+        .unwrap();
+
+        Ok(())
+    }
+
+    #[pyfunction]
+    async fn poll_next(mut reader: StrompyJsonReader) -> PyResult<Vec<Vec<f64>>> {
+        let res: MatrixBuf = poll_fn(|cx| {
+            println!("{}:{}:{:?}", file!(), line!(), std::thread::current().id());
+            let waker = cx.waker();
+            Python::with_gil(|py| {
+                let fut = reader.next();
+                let fut = pin!(fut);
+                py.allow_threads(|| {
+                    let p = fut.poll(&mut Context::from_waker(waker));
+                    p
+                })
+            })
+        })
+        .await
+        .unwrap();
+
+        dbg!(&res);
+
+        Ok(res.into())
+    }
 
     #[pymodule]
     fn strompy(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -364,6 +423,7 @@ mod py {
 
 #[cfg(test)]
 mod test {
+    use futures::{io::Cursor, AsyncReadExt, AsyncWriteExt};
     use struson::reader::{JsonReader, JsonStreamReader};
 
     use crate::PieceOfWork;
@@ -398,5 +458,30 @@ mod test {
         assert!(!json_reader.has_next().await.unwrap());
 
         json_reader.end_array().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cursor_test() {
+        let (mut reader, mut writer) =
+            futures::AsyncReadExt::split(Cursor::new(Vec::with_capacity(1024)));
+
+        let read_fut = async move {
+            let buf = &mut [0u8; 100];
+            loop {
+                let n = reader.read(buf).await.unwrap();
+                println!("Read {n} bytes: {:?}", &buf[..n]);
+            }
+        };
+
+        let write_fut = async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            writer.write(&[1, 2, 3, 4, 5, 6]).await.unwrap();
+            drop(writer);
+        };
+
+        tokio::select! {
+            _ = write_fut => {println!("Write won!")}
+            _ = read_fut => {println!("read won!")}
+        };
     }
 }
