@@ -17,7 +17,7 @@ void crc32_example()
 
 void bsn_cbindgen_example()
 {
-    const char *bsn_strs[] = {"999996356", "1112223333", "bogus!", (char[]){0xFE, 0xFF, '\0'}};
+    const char *bsn_strs[] = {"999996356", "1112223333", "bogus!",  "\xFE\xFF"};
     for (int i = 0; i < 4; i++)
     {
         const char *bsn_str = bsn_strs[i];
@@ -38,7 +38,7 @@ void bsn_cbindgen_example()
 
 void bsn_diplomat_example()
 {
-    const char *bsn_strs[] = {"999996356", "1112223333", "bogus!", (char[]){0xFE, 0xFF, '\0'}};
+    const char *bsn_strs[] = {"999996356", "1112223333", "bogus!",  "\xFE\xFF"};
     for (int i = 0; i < 4; i++)
     {
         const char *bsn_str = bsn_strs[i];
