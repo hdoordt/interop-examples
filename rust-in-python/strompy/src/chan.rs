@@ -1,107 +1,92 @@
 use std::{
-    collections::VecDeque,
-    io::{ErrorKind, Read, Result, Write},
-    sync::{atomic::AtomicBool, Arc},
-    task::Poll,
+    io::{Error, ErrorKind, Result},
+    pin::{pin, Pin},
+    sync::Arc,
+    task::{Context, Poll},
 };
 
-use futures::{lock::Mutex, task::AtomicWaker, FutureExt};
+use futures::{
+    channel::mpsc::{UnboundedReceiver, UnboundedSender},
+    task::AtomicWaker,
+    AsyncRead, AsyncWrite, Future, StreamExt,
+};
 
-#[derive(Clone)]
-pub struct Channel {
-    inner: Arc<ChannelInner>,
+pub struct ChannelReader {
+    closed: bool,
+    inner: UnboundedReceiver<u8>,
+    waker: Arc<AtomicWaker>,
 }
 
-impl Channel {
-    pub fn new() -> Self {
-        let inner = ChannelInner {
-            waker: AtomicWaker::new(),
-            buf: Mutex::new(VecDeque::new()),
-            closed: AtomicBool::new(false),
-        };
-        let inner = Arc::new(inner);
-        Self { inner }
-    }
-}
-
-struct ChannelInner {
-    waker: AtomicWaker,
-    buf: Mutex<VecDeque<u8>>,
-    closed: AtomicBool,
-}
-
-impl futures::AsyncRead for Channel {
+impl AsyncRead for ChannelReader {
     fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        mut buf: &mut [u8],
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
     ) -> Poll<Result<usize>> {
-        match self.inner.buf.lock().poll_unpin(cx) {
-            Poll::Ready(mut inner_buf) => {
-                self.inner.waker.register(cx.waker());
-                if inner_buf.is_empty() {
-                    if self.inner.closed.load(std::sync::atomic::Ordering::SeqCst) {
-                        return Poll::Ready(Err(ErrorKind::BrokenPipe.into()));
-                    }
-                    return Poll::Pending;
-                }
-                let new_len = inner_buf.len().saturating_sub(buf.len());
-                let n = inner_buf.read(buf)?;
-                buf = &mut buf[n..];
-                let m = inner_buf.read(buf)?;
-                inner_buf.resize(new_len, 0);
-                Poll::Ready(Ok(n + m))
-            }
-            Poll::Pending => Poll::Pending,
+        self.waker.register(cx.waker());
+
+        if self.closed {
+            return Poll::Ready(Err(Error::from(ErrorKind::BrokenPipe)));
+        }
+
+        let mut n = 0;
+        while let Poll::Ready(next) = pin!(self.inner.next()).poll(cx) {
+            let Some(next) = next else {
+                self.closed = true;
+                break;
+            };
+            buf[n] = next;
+            n += 1;
+        }
+
+        match n {
+            0 => Poll::Pending,
+            n => Poll::Ready(Ok(n)),
         }
     }
 }
 
-impl Drop for ChannelInner {
-    fn drop(&mut self) {
+pub struct ChannelWriter {
+    inner: UnboundedSender<u8>,
+    waker: Arc<AtomicWaker>,
+}
+
+impl AsyncWrite for ChannelWriter {
+    fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+        for b in buf.iter().copied() {
+            if let Err(_e) = self.inner.unbounded_send(b) {
+                return Poll::Ready(Err(Error::from(ErrorKind::BrokenPipe)));
+            }
+        }
+
+        // self.waker.wake();
+
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
         self.waker.wake();
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+        self.waker.wake();
+        self.inner.close_channel();
+        Poll::Ready(Ok(()))
     }
 }
 
-impl futures::AsyncWrite for Channel {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize>> {
-        self.inner.waker.register(cx.waker());
-        match self.inner.buf.lock().poll_unpin(cx) {
-            Poll::Ready(mut inner_buf) => {
-                let n = inner_buf.write(buf)?;
+pub fn channel() -> (ChannelReader, ChannelWriter) {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let waker = Arc::new(AtomicWaker::new());
 
-                if n == 0 {
-                    return Poll::Pending;
-                }
+    let r = ChannelReader {
+        closed: false,
+        inner: rx,
+        waker: waker.clone(),
+    };
 
-                self.inner.waker.wake();
+    let w = ChannelWriter { inner: tx, waker };
 
-                Poll::Ready(Ok(n))
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<()>> {
-        self.inner.waker.register(cx.waker());
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<()>> {
-        self.inner
-            .closed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.inner.waker.register(cx.waker());
-        Poll::Ready(Ok(()))
-    }
+    (r, w)
 }

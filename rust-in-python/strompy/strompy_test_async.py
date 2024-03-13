@@ -4,21 +4,19 @@ import strompy
 
 
 async def pipe_bytes(writer):
-    async with aiofiles.open('op.json', mode='rb', buffering=100) as file:
+    async with aiofiles.open('op.json', mode='rb', buffering=1000) as file:
         while True:
-            bytes = await file.read(100)
+            bytes = await file.read(1000)
+            print('Feeding writer: ' + bytes.decode())
             if len(bytes) == 0:
                 break
             await strompy.feed_bytes(writer, bytes)
-            await asyncio.sleep(1)
 
 
 async def poll_strompy(reader):
-    while True:
-        print('Polling Strompy')
-        res = await strompy.poll_next(reader)
-        await asyncio.sleep(1)
-        print(res)
+    res = await strompy.poll_next(reader)
+    print('Result:')
+    print(res)
 
 
 async def main():

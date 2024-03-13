@@ -208,28 +208,21 @@ impl From<std::io::Error> for Error {
 pub(crate) mod channel {
     use std::sync::Arc;
 
-    use crate::chan::Channel;
+    use crate::chan::{ChannelReader, ChannelWriter};
 
     use super::*;
-    use futures::{
-        io::Cursor,
-        lock::Mutex,
-        AsyncWriteExt,
-        // AsyncReadExt, AsyncWriteExt,
-    };
+    use futures::{lock::Mutex, AsyncWriteExt};
     use pyo3::prelude::*;
     use struson::reader::JsonStreamReader;
 
     #[pyclass]
     #[derive(Clone)]
     pub struct StrompyWriter {
-        // inner: Arc<Mutex<StrompyWriterInner>>,
-        writer: Channel,
+        inner: Arc<Mutex<StrompyWriterInner>>,
     }
 
     struct StrompyWriterInner {
-        // writer: WriteHalf<Cursor<Vec<u8>>>,
-        writer: Channel,
+        writer: ChannelWriter,
     }
 
     impl Drop for StrompyWriterInner {
@@ -240,12 +233,8 @@ pub(crate) mod channel {
 
     impl StrompyWriter {
         pub async fn feed(&mut self, bytes: &[u8]) -> Result<()> {
-            println!("Feeding writer:\n{}", String::from_utf8_lossy(&bytes));
-            // let mut writer = self.writer.lock().await;
-            // writer.write_all(bytes).await?;
-            // let mut inner = self.inner.lock().await;
-            // inner.writer.write(bytes).await?;
-            self.writer.write_all(bytes).await?;
+            let mut inner = self.inner.lock().await;
+            inner.writer.write(bytes).await?;
             Ok(())
         }
     }
@@ -253,14 +242,12 @@ pub(crate) mod channel {
     #[pyclass]
     #[derive(Clone)]
     pub struct StrompyJsonReader {
-        // reader: Arc<Mutex<tokio::io::DuplexStream>>,
         inner: Arc<Mutex<StrompyJsonReaderInner>>,
     }
 
     struct StrompyJsonReaderInner {
         in_array: bool,
-        // reader: JsonStreamReader<ReadHalf<Cursor<Vec<u8>>>>,
-        reader: JsonStreamReader<Channel>,
+        reader: JsonStreamReader<ChannelReader>,
     }
 
     impl Drop for StrompyJsonReaderInner {
@@ -282,10 +269,9 @@ pub(crate) mod channel {
     }
 
     pub fn channel() -> (StrompyJsonReader, StrompyWriter) {
-        // let (reader, writer) = Cursor::new(Vec::with_capacity(1024)).split();
-        let chan = Channel::new();
+        let (r, w) = chan::channel();
 
-        let reader = JsonStreamReader::new(chan.clone());
+        let reader = JsonStreamReader::new(r);
         let inner = StrompyJsonReaderInner {
             in_array: false,
             reader,
@@ -293,9 +279,9 @@ pub(crate) mod channel {
         let inner = Arc::new(Mutex::new(inner));
         let reader = StrompyJsonReader { inner };
 
-        // let inner = StrompyWriterInner { writer: chan };
-        // let inner = Arc::new(Mutex::new(inner));
-        let writer = StrompyWriter { writer: chan };
+        let inner = StrompyWriterInner { writer: w };
+        let inner = Arc::new(Mutex::new(inner));
+        let writer = StrompyWriter { inner };
 
         (reader, writer)
     }
@@ -330,44 +316,8 @@ mod py {
         Ok(crate::channel::channel())
     }
 
-    /*
-    #[pyfunction]
-    fn feed_bytes<'py>(
-        py: Python<'py>,
-        mut writer: StrompyWriter,
-        read_coro: &PyAny,
-    ) -> PyResult<&'py PyAny> {
-        let read_fut = into_future(read_coro)?;
-
-        future_into_py(py, async move {
-            let bytes = read_fut.await.unwrap();
-            let bytes: Vec<u8> = Python::with_gil(|py| {
-                let bytes: &PyBytes = bytes.extract(py).unwrap();
-
-                // This probably copies everything, and therefore defeats the purpose
-                bytes.extract().unwrap()
-            });
-
-            writer.feed(&bytes).await.unwrap();
-
-            Ok(())
-        })
-    }
-
-    #[pyfunction]
-    fn poll_next<'py>(py: Python<'py>, mut reader: StrompyJsonReader) -> PyResult<&'py PyAny> {
-        future_into_py(py, async move {
-            println!("Polling");
-            let m = reader.next().await.unwrap();
-            let res: Vec<Vec<f64>> = m.into();
-            Ok(res)
-        })
-    }
-    */
-
     #[pyfunction]
     async fn feed_bytes<'py>(mut writer: StrompyWriter, bytes: Py<PyBytes>) -> PyResult<()> {
-        println!("{}:{}:{:?}", file!(), line!(), std::thread::current().id());
         poll_fn(|cx| {
             let waker = cx.waker();
             Python::with_gil(|py| {
@@ -375,7 +325,6 @@ mod py {
                 let fut = writer.feed(bytes);
                 let fut = pin!(fut);
                 py.allow_threads(|| {
-                    println!("{}:{}:{:?}", file!(), line!(), std::thread::current().id());
                     let p = fut.poll(&mut Context::from_waker(waker));
                     p
                 })
@@ -390,7 +339,6 @@ mod py {
     #[pyfunction]
     async fn poll_next(mut reader: StrompyJsonReader) -> PyResult<Vec<Vec<f64>>> {
         let res: MatrixBuf = poll_fn(|cx| {
-            println!("{}:{}:{:?}", file!(), line!(), std::thread::current().id());
             let waker = cx.waker();
             Python::with_gil(|py| {
                 let fut = reader.next();
@@ -403,14 +351,11 @@ mod py {
         })
         .await
         .unwrap();
-
-        dbg!(&res);
-
         Ok(res.into())
     }
 
     #[pymodule]
-    fn strompy(_py: Python, m: &PyModule) -> PyResult<()> {
+    fn strompy(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(exec, m)?)?;
         m.add_function(wrap_pyfunction!(channel, m)?)?;
         m.add_function(wrap_pyfunction!(feed_bytes, m)?)?;
