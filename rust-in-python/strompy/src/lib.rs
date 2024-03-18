@@ -5,7 +5,6 @@ use heapless::Vec as HeaplessVec;
 use nalgebra as na;
 use struson::reader::{JsonReader, JsonStreamReader};
 
-mod chan;
 type Result<T> = core::result::Result<T, Error>;
 
 /// A [nalgebra::Matrix] that is backed by some other means of storage.
@@ -205,38 +204,19 @@ impl From<std::io::Error> for Error {
     }
 }
 
-pub(crate) mod channel {
+mod strompychan {
     use std::sync::Arc;
 
-    use crate::chan::{ChannelReader, ChannelWriter};
+    use futures::lock::Mutex;
+    use pychan::reader::PyBytesReader;
+    use pyo3::pyclass;
+    use struson::reader::{JsonReader, JsonStreamReader};
 
-    use super::*;
-    use futures::{lock::Mutex, AsyncWriteExt};
-    use pyo3::prelude::*;
-    use struson::reader::JsonStreamReader;
+    use crate::{MatrixBuf, PieceOfWork, Result};
 
-    #[pyclass]
-    #[derive(Clone)]
-    pub struct StrompyWriter {
-        inner: Arc<Mutex<StrompyWriterInner>>,
-    }
-
-    struct StrompyWriterInner {
-        writer: ChannelWriter,
-    }
-
-    impl Drop for StrompyWriterInner {
-        fn drop(&mut self) {
-            println!("Dropped StrompyWriterInner!");
-        }
-    }
-
-    impl StrompyWriter {
-        pub async fn feed(&mut self, bytes: &[u8]) -> Result<()> {
-            let mut inner = self.inner.lock().await;
-            inner.writer.write(bytes).await?;
-            Ok(())
-        }
+    struct StrompyJsonReaderInner {
+        reader: JsonStreamReader<PyBytesReader>,
+        in_array: bool,
     }
 
     #[pyclass]
@@ -245,18 +225,19 @@ pub(crate) mod channel {
         inner: Arc<Mutex<StrompyJsonReaderInner>>,
     }
 
-    struct StrompyJsonReaderInner {
-        in_array: bool,
-        reader: JsonStreamReader<ChannelReader>,
-    }
-
-    impl Drop for StrompyJsonReaderInner {
-        fn drop(&mut self) {
-            println!("Dropped JSON Reader Inner");
-        }
-    }
-
     impl StrompyJsonReader {
+        pub fn new(reader: PyBytesReader) -> Self {
+            let reader = JsonStreamReader::new(reader);
+            let inner = StrompyJsonReaderInner {
+                reader,
+                in_array: false,
+            };
+
+            Self {
+                inner: Arc::new(Mutex::new(inner)),
+            }
+        }
+
         pub async fn next(&mut self) -> Result<MatrixBuf> {
             let mut inner = self.inner.lock().await;
             if !inner.in_array {
@@ -267,36 +248,17 @@ pub(crate) mod channel {
             PieceOfWork::exec_streamingly(&mut inner.reader).await
         }
     }
-
-    pub fn channel() -> (StrompyJsonReader, StrompyWriter) {
-        let (r, w) = chan::channel();
-
-        let reader = JsonStreamReader::new(r);
-        let inner = StrompyJsonReaderInner {
-            in_array: false,
-            reader,
-        };
-        let inner = Arc::new(Mutex::new(inner));
-        let reader = StrompyJsonReader { inner };
-
-        let inner = StrompyWriterInner { writer: w };
-        let inner = Arc::new(Mutex::new(inner));
-        let writer = StrompyWriter { inner };
-
-        (reader, writer)
-    }
 }
 
 mod py {
-    use std::{future::Future, pin::pin, task::Context};
+    use std::io;
 
-    use futures::future::poll_fn;
+    use pychan::py_bytes::PyBytesSender;
+
+    use futures::SinkExt;
     use pyo3::{prelude::*, types::PyBytes};
 
-    use crate::{
-        channel::{StrompyJsonReader, StrompyWriter},
-        MatrixBuf, PieceOfWork,
-    };
+    use crate::{strompychan::StrompyJsonReader, Error, MatrixBuf, PieceOfWork};
 
     impl From<MatrixBuf> for Vec<Vec<f64>> {
         fn from(MatrixBuf { d, n }: MatrixBuf) -> Self {
@@ -312,46 +274,35 @@ mod py {
     }
 
     #[pyfunction]
-    fn channel<'py>(_py: Python<'py>) -> PyResult<(StrompyJsonReader, StrompyWriter)> {
-        Ok(crate::channel::channel())
+    fn channel() -> (PyBytesSender, StrompyJsonReader) {
+        let (tx, rx) = pychan::py_bytes::channel();
+        let reader = rx.into_reader();
+        let reader = StrompyJsonReader::new(reader);
+
+        (tx, reader)
     }
 
     #[pyfunction]
-    async fn feed_bytes<'py>(mut writer: StrompyWriter, bytes: Py<PyBytes>) -> PyResult<()> {
-        poll_fn(|cx| {
-            let waker = cx.waker();
-            Python::with_gil(|py| {
-                let bytes = bytes.as_bytes(py);
-                let fut = writer.feed(bytes);
-                let fut = pin!(fut);
-                py.allow_threads(|| {
-                    let p = fut.poll(&mut Context::from_waker(waker));
-                    p
-                })
-            })
-        })
-        .await
-        .unwrap();
-
+    async fn feed_bytes(mut writer: PyBytesSender, bytes: Py<PyBytes>) -> PyResult<()> {
+        writer.send(bytes).await.unwrap();
         Ok(())
     }
 
     #[pyfunction]
-    async fn poll_next(mut reader: StrompyJsonReader) -> PyResult<Vec<Vec<f64>>> {
-        let res: MatrixBuf = poll_fn(|cx| {
-            let waker = cx.waker();
-            Python::with_gil(|py| {
-                let fut = reader.next();
-                let fut = pin!(fut);
-                py.allow_threads(|| {
-                    let p = fut.poll(&mut Context::from_waker(waker));
-                    p
-                })
-            })
-        })
-        .await
-        .unwrap();
-        Ok(res.into())
+    async fn poll_next(mut reader: StrompyJsonReader) -> PyResult<Option<Vec<Vec<f64>>>> {
+        match reader.next().await {
+            Ok(r) => Ok(Some(r.into())),
+            Err(Error::Struson(struson::reader::ReaderError::IoError { error, .. }))
+                if error.kind() == io::ErrorKind::BrokenPipe =>
+            {
+                Ok(None)
+            }
+            e @ Err(_) => {
+                // TODO return err instead of panicking here
+                e.unwrap();
+                unreachable!()
+            }
+        }
     }
 
     #[pymodule]
@@ -360,8 +311,6 @@ mod py {
         m.add_function(wrap_pyfunction!(channel, m)?)?;
         m.add_function(wrap_pyfunction!(feed_bytes, m)?)?;
         m.add_function(wrap_pyfunction!(poll_next, m)?)?;
-        m.add_class::<StrompyWriter>()?;
-        m.add_class::<StrompyJsonReader>()?;
         Ok(())
     }
 }
@@ -369,6 +318,7 @@ mod py {
 #[cfg(test)]
 mod test {
     use futures::{io::Cursor, AsyncReadExt, AsyncWriteExt};
+
     use struson::reader::{JsonReader, JsonStreamReader};
 
     use crate::PieceOfWork;
