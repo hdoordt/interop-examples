@@ -1,8 +1,12 @@
-use std::num::{ParseFloatError, ParseIntError};
+use std::{
+    fmt::Display,
+    num::{ParseFloatError, ParseIntError},
+};
 
 use futures::AsyncRead;
 use heapless::Vec as HeaplessVec;
 use nalgebra as na;
+use pyo3::{IntoPy, Py, PyAny};
 use struson::reader::{JsonReader, JsonStreamReader};
 
 type Result<T> = core::result::Result<T, Error>;
@@ -180,6 +184,30 @@ pub enum Error {
     Io(std::io::Error),
 }
 
+impl IntoPy<Py<PyAny>> for Error {
+    fn into_py(self, py: pyo3::prelude::Python<'_>) -> Py<PyAny> {
+        self.to_string().into_py(py)
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Json(e) => write!(f, "Json error: {e}"),
+            Error::Struson(e) => write!(f, "Struson error: {e}"),
+            Error::ParseFloat(e) => write!(f, "ParseFloat error: {e}"),
+            Error::ParseInt(e) => write!(f, "ParseInt error: {e}"),
+            Error::Io(e) => write!(f, "Io error: {e}"),
+        }
+    }
+}
+
+impl From<Error> for pyo3::PyErr {
+    fn from(e: Error) -> Self {
+        pyo3::PyErr::new::<pyo3::exceptions::PyException, _>(e)
+    }
+}
+
 impl From<struson::reader::ReaderError> for Error {
     fn from(e: struson::reader::ReaderError) -> Self {
         Self::Struson(e)
@@ -238,27 +266,31 @@ mod strompychan {
             }
         }
 
-        pub async fn next(&mut self) -> Result<MatrixBuf> {
+        pub async fn next(&mut self) -> Result<Option<MatrixBuf>> {
             let mut inner = self.inner.lock().await;
             if !inner.in_array {
                 println!("Begin array");
                 inner.reader.begin_array().await.unwrap();
                 inner.in_array = true;
             }
-            PieceOfWork::exec_streamingly(&mut inner.reader).await
+            if inner.reader.has_next().await? {
+                let next = PieceOfWork::exec_streamingly(&mut inner.reader).await?;
+                Ok(Some(next))
+            } else {
+                Ok(None)
+            }
         }
     }
 }
 
 mod py {
-    use std::io;
 
     use pychan::py_bytes::PyBytesSender;
 
     use futures::SinkExt;
     use pyo3::{prelude::*, types::PyBytes};
 
-    use crate::{strompychan::StrompyJsonReader, Error, MatrixBuf, PieceOfWork};
+    use crate::{strompychan::StrompyJsonReader, MatrixBuf, PieceOfWork};
 
     impl From<MatrixBuf> for Vec<Vec<f64>> {
         fn from(MatrixBuf { d, n }: MatrixBuf) -> Self {
@@ -284,25 +316,14 @@ mod py {
 
     #[pyfunction]
     async fn feed_bytes(mut writer: PyBytesSender, bytes: Py<PyBytes>) -> PyResult<()> {
-        writer.send(bytes).await.unwrap();
+        writer.send(bytes).await?;
         Ok(())
     }
 
     #[pyfunction]
     async fn poll_next(mut reader: StrompyJsonReader) -> PyResult<Option<Vec<Vec<f64>>>> {
-        match reader.next().await {
-            Ok(r) => Ok(Some(r.into())),
-            Err(Error::Struson(struson::reader::ReaderError::IoError { error, .. }))
-                if error.kind() == io::ErrorKind::BrokenPipe =>
-            {
-                Ok(None)
-            }
-            e @ Err(_) => {
-                // TODO return err instead of panicking here
-                e.unwrap();
-                unreachable!()
-            }
-        }
+        let next = reader.next().await?.map(Into::into);
+        Ok(next)
     }
 
     #[pymodule]
@@ -317,8 +338,6 @@ mod py {
 
 #[cfg(test)]
 mod test {
-    use futures::{io::Cursor, AsyncReadExt, AsyncWriteExt};
-
     use struson::reader::{JsonReader, JsonStreamReader};
 
     use crate::PieceOfWork;
@@ -353,30 +372,5 @@ mod test {
         assert!(!json_reader.has_next().await.unwrap());
 
         json_reader.end_array().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn cursor_test() {
-        let (mut reader, mut writer) =
-            futures::AsyncReadExt::split(Cursor::new(Vec::with_capacity(1024)));
-
-        let read_fut = async move {
-            let buf = &mut [0u8; 100];
-            loop {
-                let n = reader.read(buf).await.unwrap();
-                println!("Read {n} bytes: {:?}", &buf[..n]);
-            }
-        };
-
-        let write_fut = async move {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            writer.write(&[1, 2, 3, 4, 5, 6]).await.unwrap();
-            drop(writer);
-        };
-
-        tokio::select! {
-            _ = write_fut => {println!("Write won!")}
-            _ = read_fut => {println!("read won!")}
-        };
     }
 }
