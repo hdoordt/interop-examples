@@ -1,16 +1,19 @@
-use std::slice;
-
-/// Calculate CRC32 for passed data.
+/// Calculate CRC32 for passed data. If len is non-zero, data must point to a valid slice in memory of length len.
 ///
 /// # Safety
-/// This function uses [slice::from_raw_parts] to create a slice
+/// This function uses [std::slice::from_raw_parts] to create a slice
 /// out of the passed raw pointer and length, and
 /// this function exhibits Undefined Behavior in the same cases as
 /// `from_raw_parts`
 #[no_mangle]
-pub unsafe extern "C" fn crc32(data: * const u8, len: usize) -> u32 {
-    let data = slice::from_raw_parts(data, len);
-    crc32_rust(data)
+pub unsafe extern "C" fn crc32(data: *const u8, len: usize) -> u32 {
+    let slice = if len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data, len)
+    };
+
+    crc32_rust(slice)
 }
 
 fn crc32_rust(data: &[u8]) -> u32 {
