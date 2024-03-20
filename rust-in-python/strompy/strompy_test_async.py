@@ -2,8 +2,7 @@ import asyncio
 import aiofiles
 import strompy
 
-
-async def pipe_bytes(writer):
+async def feed(writer):
     async with aiofiles.open('op.json', mode='rb', buffering=1000) as file:
         while True:
             bytes = await file.read(16)
@@ -13,7 +12,7 @@ async def pipe_bytes(writer):
         print('Done reading!')
 
 
-async def poll_strompy(reader):
+async def poll(reader):
     while True:
         res = await strompy.poll_next(reader)
         if res is None:
@@ -23,11 +22,10 @@ async def poll_strompy(reader):
 
 async def main():
     writer, reader = strompy.channel()
-    test1 = asyncio.create_task(pipe_bytes(writer))
-    test2 = asyncio.create_task(poll_strompy(reader))
+    write = asyncio.create_task(feed(writer))
+    poll = asyncio.create_task(poll(reader))
 
-    await asyncio.gather(test1, test2)
-    await test1
+    await asyncio.gather(write, poll)
 
 asyncio.run(main())
 
