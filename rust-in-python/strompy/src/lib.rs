@@ -1,15 +1,12 @@
-use std::{
-    fmt::Display,
-    num::{ParseFloatError, ParseIntError},
-};
-
+use error::StrompyError;
 use futures::AsyncRead;
 use heapless::Vec as HeaplessVec;
 use nalgebra as na;
-use pyo3::{IntoPy, Py, PyAny};
 use struson::reader::{JsonReader, JsonStreamReader};
 
-type Result<T> = core::result::Result<T, Error>;
+mod error;
+
+type StrompyResult<T> = core::result::Result<T, StrompyError>;
 
 /// A [nalgebra::Matrix] that is backed by some other means of storage.
 /// Allows for backing [nalgebra::Matrix] with some stack-based
@@ -37,33 +34,28 @@ impl MatrixBuf {
 
     pub async fn deserialize<R: AsyncRead + Unpin>(
         reader: &mut JsonStreamReader<R>,
-    ) -> Result<Self> {
+    ) -> StrompyResult<Self> {
         reader.begin_object().await?;
 
-        let mut d = None;
-        let mut n = None;
-        for _ in 0..2 {
-            match reader.next_name().await? {
-                "d" => {
-                    reader.begin_array().await?;
-                    let mut d_vec = HeaplessVec::new();
-                    while reader.has_next().await? {
-                        d_vec.push(reader.next_number().await??).unwrap();
-                    }
-                    reader.end_array().await?;
-                    d = Some(d_vec);
-                }
-                "n" => n = Some(reader.next_number().await??),
-                _ => return Err(Error::Json("Unexpected field name in MatrixBuf")),
-            }
+        // First, read in the data
+        let "d" = reader.next_name().await? else {
+            return Err(StrompyError::Json(r#"Unexpected key encountered, expected "d""#));
+        };
+        reader.begin_array().await?;
+        let mut d = HeaplessVec::new();
+        while reader.has_next().await? {
+            d.push(reader.next_number().await??).unwrap();
         }
+        reader.end_array().await?;
+
+        // Then, read the number of columns
+        let "n" = reader.next_name().await? else {
+            return Err(StrompyError::Json(r#"Unexpected key encountered, expected "n""#));
+        };
+        let n = reader.next_number().await??;
 
         reader.end_object().await?;
-        let (Some(d), Some(n)) = (d, n) else {
-            return Err(Error::Json(
-                "Not all fields of MatrixBuf were given, or too many fields",
-            ));
-        };
+
         Ok(Self { d, n })
     }
 }
@@ -93,32 +85,40 @@ impl Operation {
 
     pub async fn deserialize<R: AsyncRead + Unpin>(
         reader: &mut JsonStreamReader<R>,
-    ) -> Result<Self> {
-        reader.begin_object().await?;
-        let mut code = None;
-        let mut rhs = None;
+    ) -> StrompyResult<Self> {
+        // Reads the rhs field as a MatrixBuf
+        async fn read_rhs<R: AsyncRead + Unpin>(
+            reader: &mut JsonStreamReader<R>,
+        ) -> StrompyResult<MatrixBuf> {
+            let "rhs" = reader.next_name().await? else {
+                return Err(StrompyError::Json(r#"Unexpected key encountered, expected "rhs""#));
+            };
 
-        for _ in 0..2 {
-            match reader.next_name().await? {
-                "code" => {
-                    code = Some(reader.next_string().await?);
-                }
-                "rhs" => rhs = Some(MatrixBuf::deserialize(reader).await?),
-                _ => return Err(Error::Json("Unexpected field name in Operation object")),
-            }
+            let rhs = MatrixBuf::deserialize(reader).await?;
+            Ok(rhs)
         }
+
+        reader.begin_object().await?;
+
+        // Read op code
+        let "code" = reader.next_name().await? else {
+            return Err(StrompyError::Json(
+                r#"Unexpected key encountered, expected "code""#,
+            ));
+        };
+        let code = reader.next_str().await?;
+
+        // Depending on op code, read further data
+        let op = match code {
+            "dot" => Self::Dot {
+                rhs: read_rhs(reader).await?,
+            },
+            _ => return Err(StrompyError::Json("Unexpected Operation code")),
+        };
 
         reader.end_object().await?;
 
-        let (Some(code), Some(rhs)) = (code, rhs) else {
-            return Err(Error::Json(
-                "Not all fields of Operation were given, or too many fields",
-            ));
-        };
-        match code.as_str() {
-            "dot" => Ok(Self::Dot { rhs }),
-            _ => return Err(Error::Json("Unexpected Operation code")),
-        }
+        Ok(op)
     }
 }
 
@@ -144,23 +144,23 @@ impl PieceOfWork {
     /// Read and execute a single [PieceOfWork]
     pub async fn exec_streamingly<R: AsyncRead + Unpin>(
         reader: &mut JsonStreamReader<R>,
-    ) -> Result<MatrixBuf> {
+    ) -> StrompyResult<MatrixBuf> {
         reader.begin_object().await?;
 
         // First, we need the `lhs` object
         let "lhs" = reader.next_name().await? else {
-            return Err(Error::Json("lhs"));
+            return Err(StrompyError::Json(r#"Unexpected key encountered, expected "lhs""#));
         };
         let lhs: MatrixBuf = MatrixBuf::deserialize(reader).await?;
 
         // Then, we read the `op` array element-by-element
-        // We execute operations as they come in
         let "op" = reader.next_name().await? else {
-            return Err(Error::Json("op"));
+            return Err(StrompyError::Json(r#"Unexpected key encountered, expected "op""#));
         };
 
         reader.begin_array().await?;
 
+        // We execute operations as they come in
         let mut res = lhs;
         while reader.has_next().await? {
             let op: Operation = Operation::deserialize(reader).await?;
@@ -175,72 +175,15 @@ impl PieceOfWork {
     }
 }
 
-#[derive(Debug)]
-pub enum Error {
-    Json(&'static str),
-    Struson(struson::reader::ReaderError),
-    ParseFloat(ParseFloatError),
-    ParseInt(ParseIntError),
-    Io(std::io::Error),
-}
-
-impl IntoPy<Py<PyAny>> for Error {
-    fn into_py(self, py: pyo3::prelude::Python<'_>) -> Py<PyAny> {
-        self.to_string().into_py(py)
-    }
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Json(e) => write!(f, "Json error: {e}"),
-            Error::Struson(e) => write!(f, "Struson error: {e}"),
-            Error::ParseFloat(e) => write!(f, "ParseFloat error: {e}"),
-            Error::ParseInt(e) => write!(f, "ParseInt error: {e}"),
-            Error::Io(e) => write!(f, "Io error: {e}"),
-        }
-    }
-}
-
-impl From<Error> for pyo3::PyErr {
-    fn from(e: Error) -> Self {
-        pyo3::PyErr::new::<pyo3::exceptions::PyException, _>(e)
-    }
-}
-
-impl From<struson::reader::ReaderError> for Error {
-    fn from(e: struson::reader::ReaderError) -> Self {
-        Self::Struson(e)
-    }
-}
-
-impl From<ParseFloatError> for Error {
-    fn from(e: ParseFloatError) -> Self {
-        Self::ParseFloat(e)
-    }
-}
-
-impl From<ParseIntError> for Error {
-    fn from(e: ParseIntError) -> Self {
-        Self::ParseInt(e)
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
 mod strompychan {
     use std::sync::Arc;
 
     use futures::lock::Mutex;
     use pychan::reader::PyBytesReader;
-    use pyo3::pyclass;
+    use pyo3::{pyclass, pymethods, PyResult};
     use struson::reader::{JsonReader, JsonStreamReader};
 
-    use crate::{MatrixBuf, PieceOfWork, Result};
+    use crate::{MatrixBuf, PieceOfWork, StrompyResult};
 
     struct StrompyJsonReaderInner {
         reader: JsonStreamReader<PyBytesReader>,
@@ -266,10 +209,9 @@ mod strompychan {
             }
         }
 
-        pub async fn next(&mut self) -> Result<Option<MatrixBuf>> {
+        pub async fn next(&mut self) -> StrompyResult<Option<MatrixBuf>> {
             let mut inner = self.inner.lock().await;
             if !inner.in_array {
-                println!("Begin array");
                 inner.reader.begin_array().await.unwrap();
                 inner.in_array = true;
             }
@@ -281,10 +223,18 @@ mod strompychan {
             }
         }
     }
+
+    #[pymethods]
+    impl StrompyJsonReader {
+        #[pyo3(name = "next")]
+        async fn next_py(&mut self) -> PyResult<Option<Vec<Vec<f64>>>> {
+            let next = self.next().await?.map(Into::into);
+            Ok(next)
+        }
+    }
 }
 
 mod py {
-
     use pychan::py_bytes::PyBytesSender;
 
     use futures::SinkExt;
@@ -307,7 +257,7 @@ mod py {
 
     #[pyfunction]
     fn channel() -> (PyBytesSender, StrompyJsonReader) {
-        let (tx, rx) = pychan::py_bytes::channel();
+        let (tx, rx) = pychan::py_bytes::channel(16);
         let reader = rx.into_reader();
         let reader = StrompyJsonReader::new(reader);
 
@@ -320,18 +270,12 @@ mod py {
         Ok(())
     }
 
-    #[pyfunction]
-    async fn poll_next(mut reader: StrompyJsonReader) -> PyResult<Option<Vec<Vec<f64>>>> {
-        let next = reader.next().await?.map(Into::into);
-        Ok(next)
-    }
-
     #[pymodule]
     fn strompy(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(exec, m)?)?;
         m.add_function(wrap_pyfunction!(channel, m)?)?;
+        m.add_class::<StrompyJsonReader>()?;
         m.add_function(wrap_pyfunction!(feed_bytes, m)?)?;
-        m.add_function(wrap_pyfunction!(poll_next, m)?)?;
         Ok(())
     }
 }

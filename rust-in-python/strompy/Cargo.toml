@@ -5,7 +5,7 @@ edition = "2021"
 
 [lib]
 name = "strompy"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -17,13 +17,13 @@ serde_json = "1.0.114"
 futures = "0.3.30"
 crossbeam-queue = "0.3.11"
 pin-project = "1.1.5"
+pychan = "0.1.0"
 
 struson = { git = "https://github.com/hdoordt/struson.git", branch = "async-read-write" }
-pychan = { git = "https://github.com/hdoordt/pychan.git", branch = "main" }
 
 [dependencies.pyo3]
 version = "0.21.0-beta.0"
-features = ["full"]
+features = ["extension-module"]
 
 [dev-dependencies]
 futures-time = "3.0.0"
