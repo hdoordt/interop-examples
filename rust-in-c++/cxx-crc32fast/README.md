@@ -4,9 +4,9 @@ uses the rust [`crc32fast`](https://docs.rs/crc32fast/latest/crc32fast/index.htm
 
 ```sh
 > cat hello.txt | cargo run
-01d7afb4
+1cf81ca7
 > crc32 hello.txt
-01d7afb4
+1cf81ca7
 ```
 
 ## Notes
@@ -15,4 +15,4 @@ The `crc32fast` library uses a `Hasher` to keep track of its state, so that inpu
 
 > I suppose this can technically be worked around with `alloca`, but compilers don't really like that
 
-Because `cxx` doesn't know anything about the implementation of `crc32fast::Hasher`, we need to explicitly wrap the type and duplicate the parts of its API that we want to use from c++.
+Because `cxx` doesn't know anything about the implementation of `crc32fast::Hasher`, we need to explicitly wrap the type and duplicate the parts of its API that we want to use from C++.
