@@ -3,7 +3,10 @@ use std::{
     num::{ParseFloatError, ParseIntError},
 };
 
-use pyo3::{exceptions::{PyException, PyValueError}, prelude::*};
+use pyo3::{
+    exceptions::{PyException, PyValueError},
+    prelude::*,
+};
 
 #[derive(Debug)]
 pub enum StrompyError {
@@ -37,7 +40,6 @@ impl From<StrompyError> for pyo3::PyErr {
             StrompyError::ParseInt(e) => PyValueError::new_err(e),
             e => PyException::new_err(e),
         }
-        
     }
 }
 

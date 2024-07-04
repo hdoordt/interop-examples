@@ -2,6 +2,7 @@ use error::StrompyError;
 use futures::AsyncRead;
 use heapless::Vec as HeaplessVec;
 use nalgebra as na;
+use pyo3::{types::PyList, Py, Python};
 use struson::reader::{JsonReader, JsonStreamReader};
 
 mod error;
@@ -39,7 +40,9 @@ impl MatrixBuf {
 
         // First, read in the data
         let "d" = reader.next_name().await? else {
-            return Err(StrompyError::Json(r#"Unexpected key encountered, expected "d""#));
+            return Err(StrompyError::Json(
+                r#"Unexpected key encountered, expected "d""#,
+            ));
         };
         reader.begin_array().await?;
         let mut d = HeaplessVec::new();
@@ -50,13 +53,55 @@ impl MatrixBuf {
 
         // Then, read the number of columns
         let "n" = reader.next_name().await? else {
-            return Err(StrompyError::Json(r#"Unexpected key encountered, expected "n""#));
+            return Err(StrompyError::Json(
+                r#"Unexpected key encountered, expected "n""#,
+            ));
         };
         let n = reader.next_number().await??;
 
         reader.end_object().await?;
 
         Ok(Self { d, n })
+    }
+}
+
+impl std::iter::IntoIterator for MatrixBuf {
+    type Item = Py<PyList>;
+
+    type IntoIter = MatrixBufIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        MatrixBufIter { buf: self, i: 0 }
+    }
+}
+
+pub struct MatrixBufIter {
+    buf: MatrixBuf,
+    i: usize,
+}
+
+impl std::iter::Iterator for MatrixBufIter {
+    type Item = Py<PyList>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i >= self.buf.n {
+            None
+        } else {
+            let items = self.buf.d.iter().skip(self.i * self.buf.n).take(self.buf.n);
+            let item: Py<PyList> = Python::with_gil(|py| PyList::new_bound(py, items).unbind());
+            self.i += 1;
+            Some(item)
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.buf.n, Some(self.buf.n))
+    }
+}
+
+impl ExactSizeIterator for MatrixBufIter {
+    fn len(&self) -> usize {
+        self.buf.n
     }
 }
 
@@ -91,7 +136,9 @@ impl Operation {
             reader: &mut JsonStreamReader<R>,
         ) -> StrompyResult<MatrixBuf> {
             let "rhs" = reader.next_name().await? else {
-                return Err(StrompyError::Json(r#"Unexpected key encountered, expected "rhs""#));
+                return Err(StrompyError::Json(
+                    r#"Unexpected key encountered, expected "rhs""#,
+                ));
             };
 
             let rhs = MatrixBuf::deserialize(reader).await?;
@@ -149,13 +196,17 @@ impl PieceOfWork {
 
         // First, we need the `lhs` object
         let "lhs" = reader.next_name().await? else {
-            return Err(StrompyError::Json(r#"Unexpected key encountered, expected "lhs""#));
+            return Err(StrompyError::Json(
+                r#"Unexpected key encountered, expected "lhs""#,
+            ));
         };
         let lhs: MatrixBuf = MatrixBuf::deserialize(reader).await?;
 
         // Then, we read the `op` array element-by-element
         let "op" = reader.next_name().await? else {
-            return Err(StrompyError::Json(r#"Unexpected key encountered, expected "op""#));
+            return Err(StrompyError::Json(
+                r#"Unexpected key encountered, expected "op""#,
+            ));
         };
 
         reader.begin_array().await?;
@@ -180,7 +231,7 @@ mod strompychan {
 
     use futures::lock::Mutex;
     use pychan::reader::PyBytesReader;
-    use pyo3::{pyclass, pymethods, PyResult};
+    use pyo3::{pyclass, pymethods, types::PyList, PyResult, Python};
     use struson::reader::{JsonReader, JsonStreamReader};
 
     use crate::{MatrixBuf, PieceOfWork, StrompyResult};
@@ -227,8 +278,11 @@ mod strompychan {
     #[pymethods]
     impl StrompyJsonReader {
         #[pyo3(name = "next")]
-        async fn next_py(&mut self) -> PyResult<Option<Vec<Vec<f64>>>> {
-            let next = self.next().await?.map(Into::into);
+        async fn next_py(&mut self) -> PyResult<Option<pyo3::Py<PyList>>> {
+            let next = self
+                .next()
+                .await?
+                .map(|m| Python::with_gil(|py| PyList::new_bound(py, m).unbind()));
             Ok(next)
         }
     }
