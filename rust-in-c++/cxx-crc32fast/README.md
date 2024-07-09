@@ -3,9 +3,8 @@
 uses the rust [`crc32fast`](https://docs.rs/crc32fast/latest/crc32fast/index.html) crate from C++
 
 ```sh
-> cat hello.txt | cargo run
-1cf81ca7
-> crc32 hello.txt
+$ cargo build
+> cat hello.txt | target/debug/cxx-crc32fast
 1cf81ca7
 ```
 
